@@ -13,7 +13,7 @@ $var = 'CLAUDE_CONFIG_DIR'
 # work but "..", leading dots (.default) and trailing dots (Windows strips them) don't.
 $nameRe = '^[\w-]+([.@+][\w-]+)*$'
 # What `backup` saves per profile: the account (login + identity) and settings, not sessions/history.
-$acctFiles = '.credentials.json', '.claude.json', 'settings.json'
+$acctFiles = '.credentials.json', '.claude.json', 'settings.json', '.ccp-note'
 
 function DefaultName {
     if (Test-Path $defFile) { (Get-Content $defFile -TotalCount 1).Trim() } else { 'home' }
@@ -49,6 +49,16 @@ function NewProfileDir($n) {   # path for a profile that must not exist yet
     $dir = Join-Path $root $n
     if (Test-Path $dir) { throw "Profile '$n' already exists" }
     $dir
+}
+
+function NotePath($n) {   # a profile's note lives in its folder (so rename/remove/backup carry it); home's beside them
+    $d = ProfileDir $n
+    if ($d) { Join-Path $d '.ccp-note' } else { Join-Path $root '.home-note' }
+}
+
+function GetNote($n) {
+    $f = NotePath $n
+    if (Test-Path $f) { ([IO.File]::ReadAllText($f)).Trim() }
 }
 
 function Retarget($old, $new) {   # repoint this terminal and the saved setting if they were on $old
@@ -172,11 +182,12 @@ function WithHome($dir, [scriptblock]$body) {
 # Subscription limits, from the endpoint behind claude's own /usage screen.
 # ponytail: undocumented API; if it changes, this prints "unavailable" and only Usage needs fixing.
 function Usage($n) {
+    $idx = [array]::IndexOf(@(Names), $n) + 1   # same number `ccp list` shows
     $d = ProfileDir $n
     $f = Join-Path $(if ($d) { $d } else { Join-Path $HOME '.claude' }) '.credentials.json'
     $read = { if (Test-Path $f) { ([IO.File]::ReadAllText($f) | ConvertFrom-Json).claudeAiOauth } }
     # the shape `ccp usage --json` prints: keep it stable, scripts depend on it
-    $r = [ordered]@{ profile = $n; status = 'ok'; error = $null; five_hour = $null; week = $null }
+    $r = [ordered]@{ index = $idx; profile = $n; note = (GetNote $n); status = 'ok'; error = $null; five_hour = $null; week = $null }
     $o = & $read
     if (-not $o.accessToken) { $r.status = 'no_login'; return [pscustomobject]$r }
     if ($o.expiresAt -lt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
@@ -226,7 +237,10 @@ switch ($cmd) {
             if ((ProfileDir $n) -eq $env:CLAUDE_CONFIG_DIR) { $mark = '*' }
             $tag = ''
             if ($n -eq $def) { $tag = ' (default)' }
-            "$mark $i $n$tag [$(GetPerm (ConfigPath $n))]"
+            $line = "$mark $i $n$tag [$(GetPerm (ConfigPath $n))]"
+            $note = GetNote $n
+            if ($note) { $line += "  # $note" }
+            $line
         }
     }
     'add' {
@@ -295,6 +309,21 @@ switch ($cmd) {
         if ($rest.Count) { SetPerm $cfg $rest[0] }
         "'$name' permissions: $(GetPerm $cfg)"
     }
+    'note' {   # ccp note <name> [text...] | --clear
+        $name = Resolve $name
+        $f = NotePath $name
+        if ($rest -contains '--clear') {
+            if (Test-Path $f) { Remove-Item $f }
+            "Cleared note for '$name'"
+        } elseif ($rest.Count) {
+            $text = (($rest -join ' ') -replace '\s+', ' ').Trim()
+            [IO.File]::WriteAllText($f, $text)
+            "Note for '$name': $text"
+        } else {
+            $note = GetNote $name
+            if ($note) { $note } else { "No note for '$name'. Set one: ccp note $name <text>" }
+        }
+    }
     'usage' {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
         $ProgressPreference = 'SilentlyContinue'
@@ -306,7 +335,12 @@ switch ($cmd) {
             ConvertTo-Json -Compress -Depth 5 -InputObject @(foreach ($n in $list) { Usage $n })
         } else {
             $w = ($list | Measure-Object Length -Maximum).Maximum
-            foreach ($n in $list) { "$($n.PadRight($w))  $(UsageText (Usage $n))" }
+            foreach ($n in $list) {
+                $r = Usage $n
+                $line = "$($r.index) $($n.PadRight($w))  $(UsageText $r)"
+                if ($r.note) { $line += "  # $($r.note)" }
+                $line
+            }
         }
     }
     'backup' {   # ccp backup [file] [-p] [--only <name>], in any order
@@ -431,6 +465,8 @@ ccp perm <name> [mode] show / set permissions: bypass (no prompts), auto, edits
 ccp usage [name]       how much of the 5-hour and weekly subscription limits each
                        profile has used, and when they reset (no name = all);
                        add --json for scripts
+ccp note <name> [text] show / set a one-line note on a profile (--clear removes it);
+                       notes appear in `ccp list` and `ccp usage`
 ccp rename <old> <new> rename a profile
 ccp remove <name> [-y] delete a profile and all its data (-y skips the prompt)
 ccp backup [file] [-p] save every profile's login + settings to a zip (default: .\backups\);

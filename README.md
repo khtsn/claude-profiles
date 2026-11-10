@@ -55,6 +55,7 @@ ccp use home            # back to your original ~/.claude
 | `ccp default [name]` | Show or pick the default profile |
 | `ccp perm <name> [mode]` | Show or set the profile's permission mode |
 | `ccp usage [name]` | Show how much of its subscription limits each profile has used |
+| `ccp note <name> [text]` | Show or set a one-line note on a profile; `--clear` removes it |
 | `ccp rename <old> <new>` | Rename a profile |
 | `ccp remove <name> [-y]` | Delete a profile and all its data |
 | `ccp backup [file] [-p] [--only <name>]` | Save logins and settings to a file |
@@ -93,10 +94,14 @@ ccp run work -p "summarise this repo"
 
 ```
 > ccp usage
-home   5h  12% (resets Tue 19:00)   week  31% (resets Fri 09:00)
-work   5h -                         week  47% (resets Thu 22:59)
-api    no subscription login (API-key profile?)
+1 home   5h  12% (resets Tue 19:00)   week  31% (resets Fri 09:00)  # personal
+2 work   5h -                         week  47% (resets Thu 22:59)  # team account
+3 api    no subscription login (API-key profile?)
 ```
+
+The leading number is the profile's index from `ccp list`, so `ccp usage 2` or
+`ccp use 2` works straight from this output. A trailing `# ...` is the profile's
+note (see below).
 
 `ccp usage` shows every profile; `ccp usage work` shows one. The percentages are
 how much of the 5-hour and weekly limits the account has used across all its
@@ -107,13 +112,15 @@ For scripts, add `--json`. The output is always a one-line array, even for a
 single profile:
 
 ```json
-[{"profile":"work","status":"ok","error":null,
+[{"index":2,"profile":"work","note":"team account","status":"ok","error":null,
   "five_hour":null,
   "week":{"percent":47,"resets_at":"2026-11-12T15:59:59Z"}}]
 ```
 
 | Field | Meaning |
 | --- | --- |
+| `index` | Position in `ccp list` |
+| `note` | The profile's note, or `null` |
 | `status` | `ok`, `no_login` (API-key profile), `expired` (login needs a refresh) or `unavailable` (request failed) |
 | `error` | The error message when `status` is `unavailable`, otherwise `null` |
 | `five_hour`, `week` | `percent` used (integer) and `resets_at` (UTC, ISO 8601); `null` when no window is open or `status` is not `ok` |
@@ -134,6 +141,19 @@ ccp usage --json | ConvertFrom-Json | ForEach-Object { $_ } |
   `ccp run <name>` once fixes it.
 - API-key profiles have no subscription limits. Their spend is in the Anthropic
   Console.
+
+## Notes
+
+A one-line note per profile, for remembering which account is which:
+
+```powershell
+ccp note work team account, 100 USD plan    # set (no quotes needed)
+ccp note work                               # show
+ccp note work --clear                       # remove
+```
+
+Notes show in `ccp list` and `ccp usage`, are included in `ccp backup`, and follow
+the profile through `rename` and `remove`. `ccp note home` works too.
 
 ## Logging in with an API key
 
@@ -200,7 +220,7 @@ Things to know:
 ```
 ccp.ps1            the tool
 ccp.sh             Git Bash wrapper around ccp.ps1
-profiles\<name>\   one Claude Code config directory per profile
+profiles\<name>\   one Claude Code config directory per profile (note in .ccp-note)
 profiles\.default  the name of the default profile
 backups\           where `ccp backup` writes when no file is given
 ```
