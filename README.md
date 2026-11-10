@@ -47,14 +47,17 @@ ccp use home            # back to your original ~/.claude
 | Command | What it does |
 | --- | --- |
 | `ccp install` | Make `ccp` a command in PowerShell and Git Bash |
-| `ccp list` | Show profiles; `*` marks the one active in this terminal |
+| `ccp list [--json]` | Show profiles; `*` marks the one active in this terminal |
 | `ccp add <name>` | Create a profile and log in to it |
 | `ccp add <name> --key [key]` | Create a profile that uses an API key instead of a login |
-| `ccp use [name]` | Switch this terminal and all new ones; no name means the default |
-| `ccp run <name> [args]` | Run `claude` once under a profile without switching |
+| `ccp use [name] [--local]` | Switch this terminal and all new ones; no name means the default. `--local` switches this terminal only |
+| `ccp run <name> [--perm <mode>] [args]` | Run `claude` once under a profile without switching |
+| `ccp path <name>` | Print the profile's config folder |
 | `ccp default [name]` | Show or pick the default profile |
 | `ccp perm <name> [mode]` | Show or set the profile's permission mode |
 | `ccp usage [name]` | Show how much of its subscription limits each profile has used |
+| `ccp pool <name> [on\|off]` | Show or set whether `ccp pick` may choose this profile |
+| `ccp pick [-n <count>] [--json]` | Print the pool profile with the most room left |
 | `ccp note <name> [text]` | Show or set a one-line note on a profile; `--clear` removes it |
 | `ccp rename <old> <new>` | Rename a profile |
 | `ccp remove <name> [-y]` | Delete a profile and all its data |
@@ -83,12 +86,32 @@ cannot be only digits.
 environment variable, so new terminals and apps pick it up. Terminals that were
 already open keep the profile they had.
 
+`ccp use work --local` changes the current terminal only and leaves the saved
+setting alone, so other terminals and tools started later are not affected.
+
 `ccp run` does not switch anything. It runs `claude` once under the named profile
-and passes the remaining arguments through:
+and passes the remaining arguments through. Its exit code is `claude`'s.
 
 ```powershell
 ccp run work -p "summarise this repo"
+ccp run work --perm plan -p "review src/auth"   # read-only for this run
 ```
+
+`--perm <mode>` must come straight after the name. It overrides the profile's
+permission mode for that run and does not change the saved one.
+
+## Listing for scripts
+
+`ccp list --json` prints a one-line array:
+
+```json
+[{"number":2,"name":"work","active":false,"default":false,
+  "path":"F:\\claude-profiles\\profiles\\work","permissions":"auto",
+  "note":"team account","pool":true}]
+```
+
+`path` is the profile's config folder. To run `claude` under a profile yourself,
+set `CLAUDE_CONFIG_DIR` to it. For `home`, leave the variable unset instead.
 
 ## Usage per account
 
@@ -114,7 +137,9 @@ single profile:
 ```json
 [{"index":2,"profile":"work","note":"team account","status":"ok","error":null,
   "five_hour":null,
-  "week":{"percent":47,"resets_at":"2026-11-12T15:59:59Z"}}]
+  "week":{"percent":47,"resets_at":"2026-11-12T15:59:59Z"},
+  "number":2,"path":"F:\\claude-profiles\\profiles\\work","pool":true,
+  "headroom_percent":53,"available":true}]
 ```
 
 | Field | Meaning |
@@ -124,14 +149,43 @@ single profile:
 | `status` | `ok`, `no_login` (API-key profile), `expired` (login needs a refresh) or `unavailable` (request failed) |
 | `error` | The error message when `status` is `unavailable`, otherwise `null` |
 | `five_hour`, `week` | `percent` used (integer) and `resets_at` (UTC, ISO 8601); `null` when no window is open or `status` is not `ok` |
+| `number` | Same as `index` |
+| `path` | The profile's config folder |
+| `pool` | Whether `ccp pick` may choose it |
+| `headroom_percent` | 100 minus the fullest open window; `null` when the limits are unknown |
+| `available` | `true` when the limits were read and there is room left, or for an API-key profile |
 
-The exit code is 0 whenever the command ran, so check `status` per profile. For
-example, to pick the profile with the most weekly headroom:
+The last five fields have the same names and meaning in `cxp usage --json`, so one
+script can rank Claude and Codex profiles together.
+
+The exit code is 0 whenever the command ran, so check `status` per profile.
+
+## Picking a profile
+
+`ccp pick` prints the name of the profile with the most room left, so a script
+does not have to rank them itself:
 
 ```powershell
-ccp usage --json | ConvertFrom-Json | ForEach-Object { $_ } |
-    Where-Object status -eq ok | Sort-Object { $_.week.percent } | Select-Object -First 1 -ExpandProperty profile
+ccp pick                 # the best one
+ccp pick -n 3            # the best three, one per line
+ccp pick --json          # same objects as `ccp usage --json`, best first
+ccp run (ccp pick) -p "summarise this repo"
 ```
+
+It only considers profiles that are in the pool and `available`. API-key profiles
+come last, since their headroom is unknown. If nothing qualifies it prints an
+error and exits with 1.
+
+Every profile starts in the pool. Take one out to keep automation off it:
+
+```powershell
+ccp pool home off        # ccp pick never returns it
+ccp pool home            # show
+ccp pool home on
+```
+
+The pool only affects `ccp pick`. `ccp use` and `ccp run` still work on any
+profile. Profiles out of the pool show `[pool off]` in `ccp list` and `ccp usage`.
 
 - It sends each profile's login token to `api.anthropic.com`, the same endpoint
   Claude Code's own `/usage` screen calls. That endpoint is undocumented and may
@@ -162,6 +216,8 @@ ccp add api --key              # prompts for the key, input hidden
 ccp add api --key sk-ant-...   # or pass it directly
 ```
 
+`--api-key` is accepted as another spelling of `--key`.
+
 The key is stored in plain text as `env.ANTHROPIC_API_KEY` in the profile's
 `settings.json`, which Claude Code reads itself. Claude Code may ask once to
 confirm that you want to use the key.
@@ -180,10 +236,12 @@ profile.
 | `auto` | A classifier approves safe actions and blocks risky ones |
 | `edits` | File edits without asking, prompts for everything else |
 | `ask` | Claude Code's stock behaviour: prompts for edits and commands |
-| `plan` | Read-only planning |
+| `plan` | Read-only planning. `readonly` is accepted as another name for it |
 
-**New profiles start in `bypass`.** Change it with `ccp perm <name> ask` if you
-want prompts.
+**New profiles start in `auto`.** Use `ccp perm <name> bypass` if you want no
+prompts at all. Profiles created before this change keep the mode they had.
+
+To use a different mode for one run only, see `ccp run <name> --perm <mode>` above.
 
 ## Backup and restore
 
@@ -193,7 +251,7 @@ A backup holds each profile's account: `.credentials.json`, `.claude.json` and
 ```powershell
 ccp backup                         # all profiles -> .\backups\ccp-<date>.zip
 ccp backup D:\safe\ccp.zip         # choose the file
-ccp backup -p                      # encrypt with a password -> ...zip.enc
+ccp backup -p                      # encrypt with a password -> ...zip.enc (--password works too)
 ccp backup --only work -p          # a single profile
 
 ccp restore D:\safe\ccp.zip        # profiles that already exist are skipped
@@ -215,12 +273,31 @@ Things to know:
 - `--only` on restore takes the profile name as stored in the backup, not a list
   number.
 
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `CLAUDE_CONFIG_DIR` | Set by `ccp use` (per terminal, and saved for new ones unless `--local`). Unset means `home` |
+| `CCP_ROOT` | Keep `profiles\` and `backups\` somewhere else instead of next to the script |
+| `CCP_PASSWORD` | Backup password, to skip the prompt |
+
+## Tests
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\ccp.ps1
+```
+
+The tests use a temporary `CCP_ROOT` and a fake `claude`, so they do not touch
+your profiles, log in, or call the usage endpoint.
+
 ## Files
 
 ```
 ccp.ps1            the tool
 ccp.sh             Git Bash wrapper around ccp.ps1
-profiles\<name>\   one Claude Code config directory per profile (note in .ccp-note)
+tests\ccp.ps1      integration tests
+profiles\<name>\   one Claude Code config directory per profile (note in .ccp-note,
+                   pool opt-out in .ccp-pool-off)
 profiles\.default  the name of the default profile
 backups\           where `ccp backup` writes when no file is given
 ```

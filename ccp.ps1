@@ -6,14 +6,16 @@ $ErrorActionPreference = 'Stop'
 trap { [Console]::Error.WriteLine("ccp: $_"); exit 1 }   # one-line errors, no stack trace
 $cmd = $args[0]; $name = $args[1]   # no param(): claude flags like -p must pass through untouched
 $rest = @($args | Select-Object -Skip 2)
-$root = Join-Path $PSScriptRoot 'profiles'
+$base = $PSScriptRoot
+if ($env:CCP_ROOT) { $base = $env:CCP_ROOT }   # keep data elsewhere (also how the tests avoid real profiles)
+$root = Join-Path $base 'profiles'
 $defFile = Join-Path $root '.default'
 $var = 'CLAUDE_CONFIG_DIR'
 # Names become folder names: . @ + only singly between word chars, so emails
 # work but "..", leading dots (.default) and trailing dots (Windows strips them) don't.
 $nameRe = '^[\w-]+([.@+][\w-]+)*$'
 # What `backup` saves per profile: the account (login + identity) and settings, not sessions/history.
-$acctFiles = '.credentials.json', '.claude.json', 'settings.json', '.ccp-note'
+$acctFiles = '.credentials.json', '.claude.json', 'settings.json', '.ccp-note', '.ccp-pool-off'
 
 function DefaultName {
     if (Test-Path $defFile) { (Get-Content $defFile -TotalCount 1).Trim() } else { 'home' }
@@ -58,8 +60,22 @@ function NotePath($n) {   # a profile's note lives in its folder (so rename/remo
 
 function GetNote($n) {
     $f = NotePath $n
-    if (Test-Path $f) { ([IO.File]::ReadAllText($f)).Trim() }
+    if (Test-Path $f) { return ([IO.File]::ReadAllText($f)).Trim() }
+    $null   # a real null, so JSON says null rather than {}
 }
+
+function ProfilePath($n) {   # like ProfileDir, but home is a real path
+    $d = ProfileDir $n
+    if ($d) { $d } else { Join-Path $HOME '.claude' }
+}
+
+# Pool = the profiles `ccp pick` may hand to automation. In by default; a marker file takes one out.
+function PoolPath($n) {
+    $d = ProfileDir $n
+    if ($d) { Join-Path $d '.ccp-pool-off' } else { Join-Path $root '.home-pool-off' }
+}
+
+function InPool($n) { -not (Test-Path (PoolPath $n)) }
 
 function Retarget($old, $new) {   # repoint this terminal and the saved setting if they were on $old
     if ([Environment]::GetEnvironmentVariable($var) -eq $old) { [Environment]::SetEnvironmentVariable($var, $new) }
@@ -78,11 +94,13 @@ $modes = [ordered]@{
     plan   = 'plan'                # read-only planning
 }
 
-function ConfigPath($n) {
-    $d = ProfileDir $n
-    if (-not $d) { $d = Join-Path $HOME '.claude' }
-    Join-Path $d 'settings.json'
+function Mode($m) {   # accepts cxp's name for the read-only mode too -> a key of $modes
+    if ($m -eq 'readonly') { $m = 'plan' }
+    if (-not $m -or -not $modes.Contains("$m")) { throw "Unknown mode '$m'. Use: $($modes.Keys -join ', ') (readonly = plan)" }
+    "$m"
 }
+
+function ConfigPath($n) { Join-Path (ProfilePath $n) 'settings.json' }
 
 function GetPerm($cfg) {
     $m = $null
@@ -102,7 +120,7 @@ function LoadCfg($cfg) {
 function SaveCfg($cfg, $s) { [IO.File]::WriteAllText($cfg, ($s | ConvertTo-Json -Depth 100)) }   # UTF-8 without BOM
 
 function SetPerm($cfg, $mode) {
-    if (-not $modes.Contains($mode)) { throw "Unknown mode '$mode'. Use: $($modes.Keys -join ', ')" }
+    $mode = Mode $mode
     $s = LoadCfg $cfg
     if (-not $s.permissions) { $s | Add-Member -Force -NotePropertyName permissions -NotePropertyValue ([pscustomobject]@{}) }
     $s.permissions | Add-Member -Force -NotePropertyName defaultMode -NotePropertyValue $modes[$mode]
@@ -182,14 +200,23 @@ function WithHome($dir, [scriptblock]$body) {
 # Subscription limits, from the endpoint behind claude's own /usage screen.
 # ponytail: undocumented API; if it changes, this prints "unavailable" and only Usage needs fixing.
 function Usage($n) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
+    $ProgressPreference = 'SilentlyContinue'
     $idx = [array]::IndexOf(@(Names), $n) + 1   # same number `ccp list` shows
     $d = ProfileDir $n
-    $f = Join-Path $(if ($d) { $d } else { Join-Path $HOME '.claude' }) '.credentials.json'
+    $f = Join-Path (ProfilePath $n) '.credentials.json'
     $read = { if (Test-Path $f) { ([IO.File]::ReadAllText($f) | ConvertFrom-Json).claudeAiOauth } }
     # the shape `ccp usage --json` prints: keep it stable, scripts depend on it
-    $r = [ordered]@{ index = $idx; profile = $n; note = (GetNote $n); status = 'ok'; error = $null; five_hour = $null; week = $null }
+    $r = [ordered]@{ index = $idx; profile = $n; note = (GetNote $n); status = 'ok'; error = $null; five_hour = $null; week = $null
+        # the fields below are shared with `cxp usage --json`, so one script can rank both tools' profiles
+        number = $idx; path = (ProfilePath $n); pool = (InPool $n); headroom_percent = $null; available = $false }
     $o = & $read
-    if (-not $o.accessToken) { $r.status = 'no_login'; return [pscustomobject]$r }
+    if (-not $o.accessToken) {
+        $r.status = 'no_login'
+        # an API-key profile can still run work; it just has no subscription window to measure
+        try { $r.available = [bool](LoadCfg (ConfigPath $n)).env.ANTHROPIC_API_KEY } catch { }
+        return [pscustomobject]$r
+    }
     if ($o.expiresAt -lt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
         # stale token: let claude refresh it. Via cmd so its stderr can't trip $ErrorActionPreference.
         WithHome $d { cmd /c 'claude auth status >nul 2>&1' }
@@ -210,6 +237,10 @@ function Usage($n) {
     }
     $r.five_hour = & $win $u.five_hour
     $r.week = & $win $u.seven_day
+    $used = 0   # the fullest open window decides how much room is left
+    foreach ($w in $r.five_hour, $r.week) { if ($w -and $w.percent -gt $used) { $used = $w.percent } }
+    $r.headroom_percent = [math]::Max(0, 100 - $used)
+    $r.available = $r.headroom_percent -gt 0
     [pscustomobject]$r
 }
 
@@ -227,26 +258,37 @@ function UsageText($r) {
     "5h $(& $fmt $r.five_hour)   week $(& $fmt $r.week)"
 }
 
+function Opts { , @(@($name) + $rest | Where-Object { $_ }) }   # everything after the command, for commands whose flags go anywhere
+
 switch ($cmd) {
     'list' {
         $def = DefaultName
+        $asJson = (Opts) -contains '--json'
         $i = 0
-        foreach ($n in Names) {
+        $rows = @(foreach ($n in Names) {
             $i++
+            $active = (ProfileDir $n) -eq $env:CLAUDE_CONFIG_DIR
+            $note = GetNote $n
+            if ($asJson) {   # same fields as `cxp list --json`; for home, run claude with CLAUDE_CONFIG_DIR unset
+                [pscustomobject]@{ number = $i; name = $n; active = $active; default = ($n -eq $def)
+                    path = ProfilePath $n; permissions = GetPerm (ConfigPath $n); note = $note; pool = InPool $n }
+                continue
+            }
             $mark = ' '
-            if ((ProfileDir $n) -eq $env:CLAUDE_CONFIG_DIR) { $mark = '*' }
+            if ($active) { $mark = '*' }
             $tag = ''
             if ($n -eq $def) { $tag = ' (default)' }
             $line = "$mark $i $n$tag [$(GetPerm (ConfigPath $n))]"
-            $note = GetNote $n
+            if (-not (InPool $n)) { $line += ' [pool off]' }
             if ($note) { $line += "  # $note" }
             $line
-        }
+        })
+        if ($asJson) { ConvertTo-Json -Compress -Depth 3 -InputObject $rows } else { $rows }
     }
     'add' {
         $dir = NewProfileDir $name
         $key = $null
-        if ($rest[0] -eq '--key') {
+        if ($rest[0] -in '--key', '--api-key') {
             $key = $rest[1]
             if (-not $key) {   # prompt hidden, so the key stays out of shell history
                 $key = [Net.NetworkCredential]::new('', (Read-Host 'API key' -AsSecureString)).Password
@@ -256,20 +298,61 @@ switch ($cmd) {
         }
         New-Item -ItemType Directory $dir | Out-Null
         $cfg = Join-Path $dir 'settings.json'
-        SetPerm $cfg 'bypass'   # new profiles default to bypass all
+        SetPerm $cfg 'auto'   # safe default; `ccp perm <name> bypass` opts out of all prompts
         if ($key) { SetKey $cfg $key } else { WithHome $dir { claude auth login } }
         "Created '$name'. Switch to it: ccp use $name"
     }
-    'use' {
-        $name = Resolve $name
+    'use' {   # ccp use [name] [--local]
+        $o = Opts
+        $name = Resolve (@($o -ne '--local')[0])
         $dir = ProfileDir $name
         [Environment]::SetEnvironmentVariable($var, $dir)           # this terminal
-        [Environment]::SetEnvironmentVariable($var, $dir, 'User')   # new terminals / apps
-        "Now using '$name'"
+        if ($o -contains '--local') { "Now using '$name' (this terminal only)" }
+        else {
+            [Environment]::SetEnvironmentVariable($var, $dir, 'User')   # new terminals / apps
+            "Now using '$name'"
+        }
     }
-    'run' {
+    'path' {   # the profile's config folder. --env: the value CLAUDE_CONFIG_DIR needs (nothing for home); ccp.sh uses it
+        $o = Opts
+        $name = Resolve (@($o | Where-Object { $_ -notin '--env', '--local' })[0])
+        if ($o -contains '--env') { ProfileDir $name } else { ProfilePath $name }
+    }
+    'run' {   # ccp run <name> [--perm <mode>] [claude args]
         $name = Resolve $name
+        if ($rest[0] -eq '--perm') {   # only as the first argument, so claude's own flags stay untouched
+            $v = $modes[(Mode $rest[1])]
+            if ($v -eq 'default') { $v = 'manual' }   # the CLI flag's name for settings.json's "default"
+            $rest = @('--permission-mode', $v) + @($rest | Select-Object -Skip 2)
+        }
         WithHome (ProfileDir $name) { claude @rest }
+        exit $LASTEXITCODE   # scripts need claude's own exit code
+    }
+    'pool' {   # ccp pool <name> [on|off]
+        $name = Resolve $name
+        $f = PoolPath $name
+        switch ("$($rest[0])") {
+            ''    { }
+            'on'  { if (Test-Path $f) { Remove-Item $f } }
+            'off' { New-Item -ItemType Directory -Force $root | Out-Null; [IO.File]::WriteAllText($f, '') }
+            default { throw "Use: ccp pool <name> [on|off]" }
+        }
+        if (InPool $name) { "'$name' is in the pool" } else { "'$name' is out of the pool (ccp pick skips it)" }
+    }
+    'pick' {   # ccp pick [-n <count>] [--json]: pool profiles with room left, most headroom first
+        $o = Opts
+        $count = 1
+        $i = [array]::IndexOf([object[]]$o, '-n')
+        if ($i -ge 0) {
+            if ("$($o[$i + 1])" -notmatch '^[1-9]\d*$') { throw '-n needs a number, e.g. ccp pick -n 3' }
+            $count = [int]$o[$i + 1]
+        }
+        # out-of-pool profiles are skipped before any lookup, so their tokens are never sent
+        $rows = @(foreach ($n in @(Names | Where-Object { InPool $_ })) { Usage $n }) | Where-Object { $_.available }
+        $rows = @($rows | Sort-Object @{ Expression = { if ($null -eq $_.headroom_percent) { -1 } else { $_.headroom_percent } }; Descending = $true },
+            @{ Expression = { $_.number } } | Select-Object -First $count)   # API-key profiles (no known headroom) go last
+        if (-not $rows.Count) { throw 'No profile available: all are out of the pool, at their limit, or not logged in (see: ccp usage)' }
+        if ($o -contains '--json') { ConvertTo-Json -Compress -Depth 5 -InputObject $rows } else { $rows.profile }
     }
     'default' {
         if ($name) {
@@ -325,9 +408,7 @@ switch ($cmd) {
         }
     }
     'usage' {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
-        $ProgressPreference = 'SilentlyContinue'
-        $opts = @(@($name) + $rest | Where-Object { $_ })
+        $opts = Opts
         $who = @($opts -ne '--json')[0]
         $list = @(Names)
         if ($who) { $list = @(Resolve $who) }
@@ -338,12 +419,13 @@ switch ($cmd) {
             foreach ($n in $list) {
                 $r = Usage $n
                 $line = "$($r.index) $($n.PadRight($w))  $(UsageText $r)"
+                if (-not $r.pool) { $line += '  [pool off]' }
                 if ($r.note) { $line += "  # $($r.note)" }
                 $line
             }
         }
     }
-    'backup' {   # ccp backup [file] [-p] [--only <name>], in any order
+    'backup' {   # ccp backup [file] [-p | --password] [--only <name>], in any order
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         $o = SplitOnly @(@($name) + $rest | Where-Object { $_ })
         $opts = @($o.Rest)
@@ -353,10 +435,10 @@ switch ($cmd) {
             if (-not (ProfileDir $n)) { throw "'home' is ~/.claude and isn't part of backups" }
             $names = @($n)
         }
-        $enc = $opts -contains '-p'
-        $file = @($opts -ne '-p')[0]
+        $enc = [bool]@($opts | Where-Object { $_ -in '-p', '--password' }).Count
+        $file = @($opts | Where-Object { $_ -notin '-p', '--password' })[0]
         if (-not $file) {
-            $dir = Join-Path $PSScriptRoot 'backups'
+            $dir = Join-Path $base 'backups'
             New-Item -ItemType Directory -Force $dir | Out-Null
             $file = Join-Path $dir "ccp-$(Get-Date -Format yyyyMMdd-HHmmss).zip"
             if ($enc) { $file += '.enc' }
@@ -386,7 +468,7 @@ switch ($cmd) {
     'restore' {   # $name is the backup file; encrypted ones are detected and ask for the password
         $o = SplitOnly @(@($name) + $rest | Where-Object { $_ })
         $yes = $o.Rest -contains '-y'
-        $file = @($o.Rest -ne '-y')[0]
+        $file = @($o.Rest | Where-Object { $_ -notin '-y', '-p', '--password' })[0]   # encryption is detected; the flag is accepted for cxp parity
         if (-not $file) { throw 'Missing backup file' }
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         [byte[]]$bytes = [IO.File]::ReadAllBytes((Resolve-Path $file).ProviderPath)
@@ -453,24 +535,34 @@ switch ($cmd) {
     default {
         @'
 ccp install            make `ccp` a command in PowerShell and Git Bash (run once)
-ccp list               show profiles (* = active in this terminal)
+ccp list [--json]      show profiles (* = active in this terminal)
 ccp add <name>         create a profile and log in to it
 ccp add <name> --key   same, but with an Anthropic API key instead of a login
-                       (prompts for it; or pass it: --key sk-ant-...)
-ccp use [name]         switch (this terminal + all new ones); no name = default
-ccp run <name> [args]  run claude once under a profile without switching
+                       (prompts for it; or pass it: --key sk-ant-...; --api-key works too)
+ccp use [name] [--local]
+                       switch (this terminal + all new ones); no name = default;
+                       --local switches this terminal only
+ccp run <name> [--perm <mode>] [args]
+                       run claude once under a profile without switching;
+                       --perm overrides the permission mode for this run only
+ccp path <name>        print the profile's config folder
 ccp default [name]     show / pick the default profile
 ccp perm <name> [mode] show / set permissions: bypass (no prompts), auto, edits
-                       (auto-accept file edits), ask, plan. New profiles get bypass.
+                       (auto-accept file edits), ask, plan (read-only; also
+                       accepted as readonly). New profiles get auto.
 ccp usage [name]       how much of the 5-hour and weekly subscription limits each
                        profile has used, and when they reset (no name = all);
                        add --json for scripts
+ccp pool <name> [on|off]
+                       show / set whether `ccp pick` may choose this profile
+ccp pick [-n <count>] [--json]
+                       print the pool profile(s) with the most room left
 ccp note <name> [text] show / set a one-line note on a profile (--clear removes it);
                        notes appear in `ccp list` and `ccp usage`
 ccp rename <old> <new> rename a profile
 ccp remove <name> [-y] delete a profile and all its data (-y skips the prompt)
 ccp backup [file] [-p] save every profile's login + settings to a zip (default: .\backups\);
-                       -p encrypts it with a password you type
+                       -p (or --password) encrypts it with a password you type
 ccp restore <file> [-y] bring profiles back from a backup (-y overwrites existing ones);
                        asks for the password if the backup is encrypted
                        Both take --only <name> to save / bring back a single profile.

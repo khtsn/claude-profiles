@@ -1,3 +1,4 @@
 # profile data holds login tokens and session history: never commit
 profiles/
 *.bak
+backups/
