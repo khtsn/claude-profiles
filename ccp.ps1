@@ -233,7 +233,12 @@ function Usage($n) {
     }
     $win = {   # null = no window open, nothing used
         param($w)
-        if ($w) { [ordered]@{ percent = [int]$w.utilization; resets_at = ([DateTimeOffset]$w.resets_at).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') } }
+        if ($w) {
+            # resets_at can be null (window reported but no reset time yet)
+            $at = $null
+            if ($w.resets_at) { $at = ([DateTimeOffset]$w.resets_at).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+            [ordered]@{ percent = [int]$w.utilization; resets_at = $at }
+        }
     }
     $r.five_hour = & $win $u.five_hour
     $r.week = & $win $u.seven_day
@@ -253,6 +258,7 @@ function UsageText($r) {
     $fmt = {
         param($w)
         if (-not $w) { return '-'.PadRight(23) }   # padded to line up with a filled window
+        if (-not $w.resets_at) { return ('{0,3}% (no reset time)' -f $w.percent).PadRight(23) }
         '{0,3}% (resets {1:ddd HH:mm})' -f $w.percent, [DateTimeOffset]::Parse($w.resets_at).LocalDateTime
     }
     "5h $(& $fmt $r.five_hour)   week $(& $fmt $r.week)"
