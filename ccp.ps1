@@ -267,6 +267,9 @@ function UsageText($r) {
 function Opts { , @(@($name) + $rest | Where-Object { $_ }) }   # everything after the command, for commands whose flags go anywhere
 
 switch ($cmd) {
+    'repair' {
+        & (Join-Path $PSScriptRoot 'repair.ps1') -Tool ccp -Root $base -RepairArguments @($args | Select-Object -Skip 1)
+    }
     'list' {
         $def = DefaultName
         $asJson = (Opts) -contains '--json'
@@ -541,6 +544,8 @@ switch ($cmd) {
     default {
         @'
 ccp install            make `ccp` a command in PowerShell and Git Bash (run once)
+ccp repair [--from <old-folder>] [--apply]
+                       preview relocation repairs; --apply writes with backups (Python 3.11+)
 ccp list [--json]      show profiles (* = active in this terminal)
 ccp add <name>         create a profile and log in to it
 ccp add <name> --key   same, but with an Anthropic API key instead of a login

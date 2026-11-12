@@ -31,6 +31,42 @@ It is safe to re-run. cmd.exe is not supported.
 To uninstall, remove the folder from your user PATH and delete the `ccp.sh` line
 from `~/.bashrc`. If a profile is active, run `ccp use home` first.
 
+## Repair after moving
+
+Move the entire folder, including `profiles`, with Claude closed. From the new
+location, preview the repairs, then apply them:
+
+```powershell
+.\ccp.ps1 repair
+.\ccp.ps1 repair --apply
+# If detection missed an old folder, or the old copy still exists:
+.\ccp.ps1 repair --from 'F:\claude-profiles'
+.\ccp.ps1 repair --from 'F:\claude-profiles' --apply
+```
+
+Only `repair` requires Python 3.11+ (`python` on PATH). Preview does not write
+configuration, environment settings, or backups. `--from` can be repeated for
+multiple previous locations. Automatic detection selects missing roots referenced
+by known profiles; an existing old copy requires an explicit `--from`.
+
+Repair updates hook commands in `settings.json`, plugin installation paths in
+`plugins/known_marketplaces.json` and `plugins/installed_plugins.json`, matching
+profile environment variables, old PATH entries, and existing `ccp.sh` source
+lines in Bash startup files. It honors `CCP_ROOT` for data and uses the script's
+location for shell/PATH entries. It leaves credentials, transcripts, historical
+project records, and unrelated paths alone. It does not install missing shell
+entries; use `install` for a first installation.
+
+Applying refuses to run while a Claude/Codex process is detected. Close editor
+integrations too. Original files and saved user environment values go under
+`backups/repair-<timestamp>`; `files.json` maps each backup to its original path.
+Backups may contain private configuration. If an apply fails, inspect its error
+and backups before retrying; the whole repair is not a single transaction.
+Restart terminals and apps afterward. Git Bash refreshes its profile variable;
+start a new shell for PATH and wrapper changes.
+
+Run isolated repair tests with `python -B .\tests\repair_test.py`.
+
 ## Quick start
 
 ```powershell
@@ -47,6 +83,7 @@ ccp use home            # back to your original ~/.claude
 | Command | What it does |
 | --- | --- |
 | `ccp install` | Make `ccp` a command in PowerShell and Git Bash |
+| `ccp repair [--from <old-folder>] [--apply]` | Preview or repair references after moving this folder; requires Python 3.11+ |
 | `ccp list [--json]` | Show profiles; `*` marks the one active in this terminal |
 | `ccp add <name>` | Create a profile and log in to it |
 | `ccp add <name> --key [key]` | Create a profile that uses an API key instead of a login |

@@ -9,7 +9,7 @@ ccp() {
         # this shell only: ask ccp.ps1 what the variable should be (nothing for home)
         CLAUDE_CONFIG_DIR="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$CCP_DIR\\ccp.ps1" path --env "${@:2}" | tr -d '\r')"
     # after use, or when rename/remove took this shell's profile folder away
-    elif [ "$1" = use ] || { [ -n "$CLAUDE_CONFIG_DIR" ] && [ ! -d "$CLAUDE_CONFIG_DIR" ]; }; then
+    elif [ "$1" = use ] || { [ "$1" = repair ] && [[ " $* " == *" --apply "* ]]; } || { [ -n "$CLAUDE_CONFIG_DIR" ] && [ ! -d "$CLAUDE_CONFIG_DIR" ]; }; then
         # read back what `use` just persisted, so "default"/no-name resolve in one place
         CLAUDE_CONFIG_DIR="$(powershell.exe -NoProfile -Command "[Environment]::GetEnvironmentVariable('CLAUDE_CONFIG_DIR','User')" | tr -d '\r')"
     else
