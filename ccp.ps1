@@ -16,6 +16,8 @@ $var = 'CLAUDE_CONFIG_DIR'
 $nameRe = '^[\w-]+([.@+][\w-]+)*$'
 # What `backup` saves per profile: the account (login + identity) and settings, not sessions/history.
 $acctFiles = '.credentials.json', '.claude.json', 'settings.json', '.ccp-note', '.ccp-pool-off'
+# What `backup --creds` / `restore --creds` move: the login alone.
+$credFiles = @('.credentials.json')
 
 function DefaultName {
     if (Test-Path $defFile) { (Get-Content $defFile -TotalCount 1).Trim() } else { 'home' }
@@ -434,7 +436,7 @@ switch ($cmd) {
             }
         }
     }
-    'backup' {   # ccp backup [file] [-p | --password] [--only <name>], in any order
+    'backup' {   # ccp backup [file] [-p | --password] [--only <name>] [--creds], in any order
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         $o = SplitOnly @(@($name) + $rest | Where-Object { $_ })
         $opts = @($o.Rest)
@@ -445,17 +447,22 @@ switch ($cmd) {
             $names = @($n)
         }
         $enc = [bool]@($opts | Where-Object { $_ -in '-p', '--password' }).Count
-        $file = @($opts | Where-Object { $_ -notin '-p', '--password' })[0]
+        $creds = $opts -contains '--creds'   # the login alone: no settings, notes or data
+        $files = $acctFiles
+        if ($creds) { $files = $credFiles }
+        $file = @($opts | Where-Object { $_ -notin '-p', '--password', '--creds' })[0]
         if (-not $file) {
             $dir = Join-Path $base 'backups'
             New-Item -ItemType Directory -Force $dir | Out-Null
-            $file = Join-Path $dir "ccp-$(Get-Date -Format yyyyMMdd-HHmmss).zip"
+            $file = Join-Path $dir "ccp-$(Get-Date -Format yyyyMMdd-HHmmss)"
+            if ($creds) { $file += '-creds' }
+            $file += '.zip'
             if ($enc) { $file += '.enc' }
         }
         $file = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($file)   # .NET's cwd isn't PowerShell's
         if (Test-Path $file) { throw "'$file' already exists" }
         $found = @(foreach ($n in $names) {
-            foreach ($f in $acctFiles) {
+            foreach ($f in $files) {
                 $p = Join-Path (Join-Path $root $n) $f
                 if (Test-Path $p) { [pscustomobject]@{ Path = $p; Entry = "$n/$f"; Profile = $n } }
             }
@@ -470,14 +477,17 @@ switch ($cmd) {
         [byte[]]$bytes = $ms.ToArray()
         if ($enc) { [byte[]]$bytes = Encrypt $bytes $pw }
         [IO.File]::WriteAllBytes($file, $bytes)
-        "Backed up $(@($found.Profile | Select-Object -Unique).Count) profile(s) to $file"
+        $what = ''
+        if ($creds) { $what = ' (logins only)' }
+        "Backed up $(@($found.Profile | Select-Object -Unique).Count) profile(s)$what to $file"
         if ($enc) { 'Encrypted: without the password it cannot be restored.' }
         else { 'It contains login tokens: keep it private (or encrypt it: ccp backup -p).' }
     }
-    'restore' {   # $name is the backup file; encrypted ones are detected and ask for the password
+    'restore' {   # $name is the backup file; encrypted ones are detected and ask for the password. --creds: logins only
         $o = SplitOnly @(@($name) + $rest | Where-Object { $_ })
         $yes = $o.Rest -contains '-y'
-        $file = @($o.Rest | Where-Object { $_ -notin '-y', '-p', '--password' })[0]   # encryption is detected; the flag is accepted for cxp parity
+        $creds = $o.Rest -contains '--creds'
+        $file = @($o.Rest | Where-Object { $_ -notin '-y', '-p', '--password', '--creds' })[0]   # encryption is detected; the flag is accepted for cxp parity
         if (-not $file) { throw 'Missing backup file' }
         Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
         [byte[]]$bytes = [IO.File]::ReadAllBytes((Resolve-Path $file).ProviderPath)
@@ -499,13 +509,17 @@ switch ($cmd) {
             }
             foreach ($g in $groups) {
                 $dir = Join-Path $root $g.Name
+                $want = @($g.Group)
+                if ($creds) { $want = @($want | Where-Object { $_.Name -in $credFiles }) }
+                if (-not $want.Count) { "Skipped '$($g.Name)': no login in this backup"; continue }
                 if ((Test-Path $dir) -and -not $yes) {
-                    "Skipped '$($g.Name)': already exists (-y overwrites its login and settings)"
+                    if ($creds) { "Skipped '$($g.Name)': already exists (-y overwrites its login)" }
+                    else { "Skipped '$($g.Name)': already exists (-y overwrites its login and settings)" }
                     continue
                 }
                 New-Item -ItemType Directory -Force $dir | Out-Null
-                foreach ($e in $g.Group) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $dir $e.Name), $true) }
-                "Restored '$($g.Name)'"
+                foreach ($e in $want) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $dir $e.Name), $true) }
+                if ($creds) { "Restored login for '$($g.Name)'" } else { "Restored '$($g.Name)'" }
             }
         } finally { $zip.Dispose() }
     }
@@ -576,7 +590,9 @@ ccp backup [file] [-p] save every profile's login + settings to a zip (default: 
                        -p (or --password) encrypts it with a password you type
 ccp restore <file> [-y] bring profiles back from a backup (-y overwrites existing ones);
                        asks for the password if the backup is encrypted
-                       Both take --only <name> to save / bring back a single profile.
+                       Both take --only <name> to save / bring back a single profile,
+                       and --creds to save / bring back only the logins (no settings,
+                       notes or data).
 "home" is your original ~/.claude. Anywhere a name goes you can also give
 "default" or the number from `ccp list` (ccp use 2).
 '@

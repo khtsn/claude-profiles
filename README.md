@@ -1,16 +1,21 @@
 # ccp — Claude Code profile switcher
 
-Keep several Claude Code accounts on one Windows machine and switch between them.
+Keep several Claude Code accounts on one machine (Windows, macOS or Linux) and switch between them.
 
 Each profile is its own `CLAUDE_CONFIG_DIR`: a separate login, sessions, history,
-settings and plugins, stored in `profiles\<name>` next to the script. Nothing is
+settings and plugins, stored in `profiles/<name>` next to the script. Nothing is
 shared between profiles, and your original `~/.claude` is left alone.
 
 ## Requirements
 
-- Windows with PowerShell 5.1 or later (PowerShell 7 works too)
 - The `claude` CLI on your PATH
-- Optional: Git Bash, if you want `ccp` there as well
+- **Windows**: PowerShell 5.1 or later (PowerShell 7 works too). Optional: Git Bash, if you
+  want `ccp` there as well
+- **macOS / Linux**: bash 3.2+ (macOS's own is fine; zsh works as your shell), `jq`, `curl`,
+  `zip`/`unzip`, and OpenSSL 3 for encrypted backups (`brew install jq openssl@3` on macOS)
+
+The Windows tool is `ccp.ps1`; on macOS and Linux it is `ccp.bash`. They share the
+`profiles/` layout, settings and backup format, so a backup made on one restores on the other.
 
 ## Install
 
@@ -28,10 +33,21 @@ This makes `ccp` a command:
 
 It is safe to re-run. cmd.exe is not supported.
 
+On macOS or Linux, run once from bash or zsh:
+
+```sh
+~/projects/claude-profiles/ccp.bash install
+```
+
+This adds `source ".../ccp.sh"` to `~/.zshrc` and/or `~/.bashrc` (and `~/.bash_profile` for
+bash on macOS). Open a new terminal, then run `ccp list`. `ccp` has to be a shell function
+rather than a plain command, because `ccp use` changes `CLAUDE_CONFIG_DIR` in your shell.
+`ccp use` saves your choice in `profiles/.use`, and new terminals start on that profile.
+
 To uninstall, remove the folder from your user PATH and delete the `ccp.sh` line
 from `~/.bashrc`. If a profile is active, run `ccp use home` first.
 
-## Repair after moving
+## Repair after moving (Windows)
 
 Move the entire folder, including `profiles`, with Claude closed. From the new
 location, preview the repairs, then apply them:
@@ -82,8 +98,8 @@ ccp use home            # back to your original ~/.claude
 
 | Command | What it does |
 | --- | --- |
-| `ccp install` | Make `ccp` a command in PowerShell and Git Bash |
-| `ccp repair [--from <old-folder>] [--apply]` | Preview or repair references after moving this folder; requires Python 3.11+ |
+| `ccp install` | Make `ccp` a command in PowerShell and Git Bash (Windows), or bash and zsh (macOS / Linux) |
+| `ccp repair [--from <old-folder>] [--apply]` | Preview or repair moved paths on Windows; requires Python 3.11+ |
 | `ccp list [--json]` | Show profiles; `*` marks the one active in this terminal |
 | `ccp add <name>` | Create a profile and log in to it |
 | `ccp add <name> --key [key]` | Create a profile that uses an API key instead of a login |
@@ -98,8 +114,8 @@ ccp use home            # back to your original ~/.claude
 | `ccp note <name> [text]` | Show or set a one-line note on a profile; `--clear` removes it |
 | `ccp rename <old> <new>` | Rename a profile |
 | `ccp remove <name> [-y]` | Delete a profile and all its data |
-| `ccp backup [file] [-p] [--only <name>]` | Save logins and settings to a file |
-| `ccp restore <file> [-y] [--only <name>]` | Bring profiles back from a backup |
+| `ccp backup [file] [-p] [--only <name>] [--creds]` | Save logins and settings to a file (`--creds`: logins only) |
+| `ccp restore <file> [-y] [--only <name>] [--creds]` | Bring profiles back from a backup (`--creds`: logins only) |
 
 Running `ccp` with no arguments prints a short version of this table.
 
@@ -285,6 +301,10 @@ To use a different mode for one run only, see `ccp run <name> --perm <mode>` abo
 A backup holds each profile's account: `.credentials.json`, `.claude.json` and
 `settings.json`. Sessions and history are not included, and neither is `home`.
 
+Add `--creds` to save or bring back **only the logins** (`.credentials.json`): no
+settings, notes, `.claude.json` or data. API-key profiles have no login file, so they are
+skipped (their key lives in `settings.json`; back them up without `--creds`).
+
 ```powershell
 ccp backup                         # all profiles -> .\backups\ccp-<date>.zip
 ccp backup D:\safe\ccp.zip         # choose the file
@@ -294,6 +314,9 @@ ccp backup --only work -p          # a single profile
 ccp restore D:\safe\ccp.zip        # profiles that already exist are skipped
 ccp restore D:\safe\ccp.zip -y     # overwrite existing logins and settings
 ccp restore backup.zip.enc --only work
+
+ccp backup --creds                 # logins only -> .\backups\ccp-<date>-creds.zip
+ccp restore ccp-creds.zip --creds -y   # put logins back into existing profiles
 ```
 
 Things to know:
@@ -309,13 +332,20 @@ Things to know:
 - For scripts, set `CCP_PASSWORD` in the environment and no prompt appears.
 - `--only` on restore takes the profile name as stored in the backup, not a list
   number.
+- **macOS keeps Claude logins in the Keychain**, not in `.credentials.json`. claude stores
+  each profile as a login-keychain item named `Claude Code-credentials-<first 8 hex digits
+  of sha256(CLAUDE_CONFIG_DIR)>` (plain `Claude Code-credentials` for `home`), reads it
+  before the file, and writes refreshed logins only there. `ccp backup` therefore takes
+  the login from the Keychain (falling back to the file), and `ccp restore` writes it
+  back into the Keychain, so backups stay interchangeable with Windows and Linux.
+  `ccp rename` moves a profile's Keychain item and `ccp remove` deletes it.
 
 ## Environment variables
 
 | Variable | Effect |
 | --- | --- |
 | `CLAUDE_CONFIG_DIR` | Set by `ccp use` (per terminal, and saved for new ones unless `--local`). Unset means `home` |
-| `CCP_ROOT` | Keep `profiles\` and `backups\` somewhere else instead of next to the script |
+| `CCP_ROOT` | Keep `profiles/` and `backups/` somewhere else instead of next to the script |
 | `CCP_PASSWORD` | Backup password, to skip the prompt |
 
 ## Tests
@@ -324,18 +354,26 @@ Things to know:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\ccp.ps1
 ```
 
+```sh
+bash tests/ccp.bash        # macOS / Linux
+```
+
 The tests use a temporary `CCP_ROOT` and a fake `claude`, so they do not touch
-your profiles, log in, or call the usage endpoint.
+your profiles, log in, or call the usage endpoint. On macOS the `--creds` checks
+use a throwaway Keychain item that the test deletes.
 
 ## Files
 
 ```
-ccp.ps1            the tool
-ccp.sh             Git Bash wrapper around ccp.ps1
-tests\ccp.ps1      integration tests
+ccp.ps1            the tool on Windows
+ccp.bash           the tool on macOS / Linux
+ccp.sh             bash / zsh wrapper (Git Bash, macOS, Linux)
+tests/ccp.ps1      integration tests (Windows)
+tests/ccp.bash     integration tests (macOS / Linux)
 profiles\<name>\   one Claude Code config directory per profile (note in .ccp-note,
                    pool opt-out in .ccp-pool-off)
 profiles\.default  the name of the default profile
+profiles/.use      macOS / Linux: what `ccp use` saved for new terminals
 backups\           where `ccp backup` writes when no file is given
 ```
 
