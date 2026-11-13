@@ -76,6 +76,30 @@ function HomeSkills($dir) {   # a new profile starts with home's own skills: cop
     }
 }
 
+function HomeHooks($cfg) {   # a new profile gets home's *-axi startup hooks; home's other hooks stay home's
+    $src = Join-Path $HOME '.claude\settings.json'
+    if (-not (Test-Path $src)) { return }
+    try { $h = LoadCfg $src } catch { return }
+    if (-not $h.hooks) { return }
+    $axi = @($h.hooks.SessionStart | Where-Object { $_ -and @($_.hooks).Count -and -not @($_.hooks | Where-Object { "$($_.command)" -notmatch '-axi$' }).Count })
+    if (-not $axi.Count) { return }
+    $s = LoadCfg $cfg
+    if (-not $s.hooks) { $s | Add-Member -Force -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
+    $s.hooks | Add-Member -Force -NotePropertyName SessionStart -NotePropertyValue (@($s.hooks.SessionStart | Where-Object { $_ }) + $axi)
+    SaveCfg $cfg $s
+}
+
+function HomePrefs($cfg) {   # a new profile keeps home's memory and fast mode choices, where home made one
+    $src = Join-Path $HOME '.claude\settings.json'
+    if (-not (Test-Path $src)) { return }
+    try { $h = LoadCfg $src } catch { return }
+    $keys = @('autoMemoryEnabled', 'fastMode' | Where-Object { $null -ne $h.$_ })
+    if (-not $keys.Count) { return }
+    $s = LoadCfg $cfg
+    foreach ($k in $keys) { $s | Add-Member -Force -NotePropertyName $k -NotePropertyValue $h.$k }
+    SaveCfg $cfg $s
+}
+
 function ProfilePath($n) {   # like ProfileDir, but home is a real path
     $d = ProfileDir $n
     if ($d) { $d } else { Join-Path $HOME '.claude' }
@@ -321,6 +345,8 @@ switch ($cmd) {
         $cfg = Join-Path $dir 'settings.json'
         SetPerm $cfg 'auto'   # safe default; `ccp perm <name> bypass` opts out of all prompts
         HomeSkills $dir
+        HomeHooks $cfg
+        HomePrefs $cfg
         if ($key) { SetKey $cfg $key } else { WithHome $dir { claude auth login } }
         "Created '$name'. Switch to it: ccp use $name"
     }

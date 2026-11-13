@@ -101,7 +101,7 @@ ccp use home            # back to your original ~/.claude
 | `ccp install` | Make `ccp` a command in PowerShell and Git Bash (Windows), or bash and zsh (macOS / Linux) |
 | `ccp repair [--from <old-folder>] [--apply]` | Preview or repair moved paths on Windows; requires Python 3.11+ |
 | `ccp list [--json]` | Show profiles; `*` marks the one active in this terminal |
-| `ccp add <name>` | Create a profile and log in to it. It starts with the skills in `~/.claude/skills` |
+| `ccp add <name>` | Create a profile and log in to it. It starts with the skills in `~/.claude/skills` home's `*-axi` startup hooks, and home's memory and fast mode settings |
 | `ccp add <name> --key [key]` | Create a profile that uses an API key instead of a login |
 | `ccp use [name] [--local]` | Switch this terminal and all new ones; no name means the default. `--local` switches this terminal only |
 | `ccp run <name> [--perm <mode>] [args]` | Run `claude` once under a profile without switching |
@@ -126,6 +126,13 @@ installed for `home` works in every profile you add afterwards. On macOS / Linux
 one is a link to the folder in `~/.claude/skills` and follows its changes; on Windows it
 is a copy. `synced/`, which Claude Code manages per account, is left out. Profiles that
 already exist are not touched; link or copy a skill into `profiles/<name>/skills/` yourself.
+
+It also gets the `SessionStart` hooks from `~/.claude/settings.json` whose commands all
+end in `-axi` (such as `gh-axi`, `chrome-devtools-axi`, `lavish-axi`), which set up the
+tools some skills use. Home's other hooks, status line and plugins are not copied.
+
+`autoMemoryEnabled` and `fastMode` are copied from `~/.claude/settings.json` when home
+sets them, so turning memory or fast mode off for `home` turns it off for new profiles too.
 
 ## Naming profiles
 

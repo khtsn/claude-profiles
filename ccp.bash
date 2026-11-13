@@ -88,6 +88,24 @@ HomeSkills() {   # a new profile starts with home's own skills: links, so they f
     done
 }
 
+HomeHooks() {   # $1 settings.json. A new profile gets home's *-axi startup hooks; home's other hooks stay home's
+    local src="$HOME/.claude/settings.json" axi s
+    [ -f "$src" ] || return 0
+    axi=$(jq -c '[.hooks.SessionStart[]? | select((.hooks // []) != [] and all(.hooks[]; (.command // "") | test("-axi$")))]' "$src" 2>/dev/null) || return 0
+    [ "$axi" = '[]' ] && return 0
+    s=$(LoadCfg "$1") || exit 1
+    printf '%s' "$s" | jq --argjson axi "$axi" '.hooks.SessionStart = (.hooks.SessionStart // []) + $axi' | SaveCfg "$1"
+}
+
+HomePrefs() {   # $1 settings.json. A new profile keeps home's memory and fast mode choices, where home made one
+    local src="$HOME/.claude/settings.json" p s
+    [ -f "$src" ] || return 0
+    p=$(jq -c '{autoMemoryEnabled, fastMode} | with_entries(select(.value != null))' "$src" 2>/dev/null) || return 0
+    [ "$p" = '{}' ] && return 0
+    s=$(LoadCfg "$1") || exit 1
+    printf '%s' "$s" | jq --argjson p "$p" '. + $p' | SaveCfg "$1"
+}
+
 NotePath() {   # a profile's note lives in its folder (so rename/remove/backup carry it); home's beside them
     local d; d=$(ProfileDir "$1") || exit 1
     if [ -n "$d" ]; then echo "$d/.ccp-note"; else echo "$root/.home-note"; fi
@@ -420,6 +438,8 @@ case $cmd in
         mkdir -p "$dir" || exit 1
         SetPerm "$dir/settings.json" auto   # safe default; `ccp perm <name> bypass` opts out of all prompts
         HomeSkills "$dir"
+        HomeHooks "$dir/settings.json"
+        HomePrefs "$dir/settings.json"
         if [ -n "$key" ]; then SetKey "$dir/settings.json" "$key"; else ClaudeIn "$dir" auth login; fi
         echo "Created '$name'. Switch to it: ccp use $name"
         ;;
