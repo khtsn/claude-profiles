@@ -101,7 +101,7 @@ ccp use home            # back to your original ~/.claude
 | `ccp install` | Make `ccp` a command in PowerShell and Git Bash (Windows), or bash and zsh (macOS / Linux) |
 | `ccp repair [--from <old-folder>] [--apply]` | Preview or repair moved paths on Windows; requires Python 3.11+ |
 | `ccp list [--json]` | Show profiles; `*` marks the one active in this terminal |
-| `ccp add <name>` | Create a profile and log in to it |
+| `ccp add <name>` | Create a profile and log in to it. It starts with the skills in `~/.claude/skills` |
 | `ccp add <name> --key [key]` | Create a profile that uses an API key instead of a login |
 | `ccp use [name] [--local]` | Switch this terminal and all new ones; no name means the default. `--local` switches this terminal only |
 | `ccp run <name> [--perm <mode>] [args]` | Run `claude` once under a profile without switching |
@@ -118,6 +118,14 @@ ccp use home            # back to your original ~/.claude
 | `ccp restore <file> [-y] [--only <name>] [--creds]` | Bring profiles back from a backup (`--creds`: logins only) |
 
 Running `ccp` with no arguments prints a short version of this table.
+
+## Skills
+
+A new profile starts with your own skills from `~/.claude/skills`, so a skill you
+installed for `home` works in every profile you add afterwards. On macOS / Linux each
+one is a link to the folder in `~/.claude/skills` and follows its changes; on Windows it
+is a copy. `synced/`, which Claude Code manages per account, is left out. Profiles that
+already exist are not touched; link or copy a skill into `profiles/<name>/skills/` yourself.
 
 ## Naming profiles
 

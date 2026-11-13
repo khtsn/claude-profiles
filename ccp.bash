@@ -79,6 +79,15 @@ ProfilePath() {   # like ProfileDir, but home is a real path
     if [ -n "$d" ]; then echo "$d"; else echo "$HOME/.claude"; fi
 }
 
+HomeSkills() {   # a new profile starts with home's own skills: links, so they follow home's copies
+    local s
+    for s in "$HOME/.claude/skills"/*/; do
+        s=${s%/}
+        [ -d "$s" ] && [ "${s##*/}" != synced ] || continue   # synced/ is claude's own, per account
+        mkdir -p "$1/skills" && ln -s "$s" "$1/skills/${s##*/}"
+    done
+}
+
 NotePath() {   # a profile's note lives in its folder (so rename/remove/backup carry it); home's beside them
     local d; d=$(ProfileDir "$1") || exit 1
     if [ -n "$d" ]; then echo "$d/.ccp-note"; else echo "$root/.home-note"; fi
@@ -410,6 +419,7 @@ case $cmd in
         fi
         mkdir -p "$dir" || exit 1
         SetPerm "$dir/settings.json" auto   # safe default; `ccp perm <name> bypass` opts out of all prompts
+        HomeSkills "$dir"
         if [ -n "$key" ]; then SetKey "$dir/settings.json" "$key"; else ClaudeIn "$dir" auth login; fi
         echo "Created '$name'. Switch to it: ccp use $name"
         ;;

@@ -66,6 +66,16 @@ function GetNote($n) {
     $null   # a real null, so JSON says null rather than {}
 }
 
+function HomeSkills($dir) {   # a new profile starts with home's own skills: copies, since links need admin rights here
+    $src = Join-Path $HOME '.claude\skills'
+    if (-not (Test-Path $src)) { return }
+    foreach ($s in @(Get-ChildItem $src -Directory | Where-Object { $_.Name -notmatch '^\.' -and $_.Name -ne 'synced' })) {   # synced\ is claude's own, per account
+        $dst = Join-Path $dir 'skills'
+        New-Item -ItemType Directory -Force $dst | Out-Null
+        Copy-Item -LiteralPath $s.FullName -Destination $dst -Recurse
+    }
+}
+
 function ProfilePath($n) {   # like ProfileDir, but home is a real path
     $d = ProfileDir $n
     if ($d) { $d } else { Join-Path $HOME '.claude' }
@@ -310,6 +320,7 @@ switch ($cmd) {
         New-Item -ItemType Directory $dir | Out-Null
         $cfg = Join-Path $dir 'settings.json'
         SetPerm $cfg 'auto'   # safe default; `ccp perm <name> bypass` opts out of all prompts
+        HomeSkills $dir
         if ($key) { SetKey $cfg $key } else { WithHome $dir { claude auth login } }
         "Created '$name'. Switch to it: ccp use $name"
     }

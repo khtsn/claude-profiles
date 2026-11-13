@@ -29,12 +29,15 @@ ccp pool home off >/dev/null
 [ -f "$fixture/profiles/.home-pool-off" ] || fail 'CCP_ROOT ignored: home pool marker is not in the fixture'
 
 # add: both spellings of the key flag, and the safe default mode
-ccp add a --key sk-ant-test-a >/dev/null
+mkdir -p "$fixture/home/.claude/skills/demo" "$fixture/home/.claude/skills/synced"
+HOME=$fixture/home ccp add a --key sk-ant-test-a >/dev/null
 ccp add b --api-key sk-ant-test-b >/dev/null
 [ "$(jq -r .env.ANTHROPIC_API_KEY "$a/settings.json")" = sk-ant-test-a ] || fail 'add --key did not store the key'
 [ "$(jq -r .env.ANTHROPIC_API_KEY "$fixture/profiles/b/settings.json")" = sk-ant-test-b ] || fail 'add --api-key did not store the key'
 [ "$(jq -r .permissions.defaultMode "$a/settings.json")" = auto ] || fail 'New profiles should start in auto'
 [ "$(jq -r '.skipDangerousModePermissionPrompt // false' "$a/settings.json")" = false ] || fail 'New profiles should not skip the bypass warning'
+[ "$(readlink "$a/skills/demo")" = "$fixture/home/.claude/skills/demo" ] || fail 'add did not link the home skill'
+[ ! -e "$a/skills/synced" ] || fail 'add should leave synced/ out'
 
 # list --json
 listed=$(ccp list --json)
@@ -134,5 +137,5 @@ if [ -n "$isMac" ]; then got=$(security find-generic-password -a "$USER" -s "$(s
 [ ! -f "$k/settings.json" ] || fail 'restore --creds brought back settings'
 ccp restore "$fixture/creds.zip" --creds | grep -q 'Skipped' || fail 'restore --creds should not overwrite without -y'
 ccp restore "$file" --only a --creds | grep -q "Skipped 'a': no login" || fail 'restore --creds of an API-key profile should skip it'
-echo 'PASS: CCP_ROOT, add flags, auto default, list JSON, path, usage shared fields, pool, pick, run --perm, exit code,'
+echo 'PASS: CCP_ROOT, add flags, auto default, home skills, list JSON, path, usage shared fields, pool, pick, run --perm, exit code,'
 echo '      use / --local / saved setting, wrapper (bash, zsh), rename, remove, backup, wrong password, --creds'
