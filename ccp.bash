@@ -213,10 +213,15 @@ ReadCreds() {   # profile name -> the credentials JSON, or nothing
     local d p
     d=$(ProfileDir "$1") || exit 1
     if [ -n "$isMac" ]; then
-        security find-generic-password -a "$(KcAccount)" -s "$(KcService "$d")" -w 2>/dev/null && return 0
+        local keychain=(security) rc
+        # A locked Keychain can wait for a UI prompt. Bound reads for unattended usage.
+        [ "$2" = usage ] && keychain=(/usr/bin/perl -e 'alarm 5; exec @ARGV' security)
+        "${keychain[@]}" find-generic-password -a "$(KcAccount)" -s "$(KcService "$d")" -w 2>/dev/null && return 0
+        rc=$?
+        if [ "$2" = usage ] && [ "$rc" != 44 ] && [ ! -f "$(ProfilePath "$1")/.credentials.json" ]; then return 1; fi
     fi
     p=$(ProfilePath "$1") || exit 1
-    [ -f "$p/.credentials.json" ] && cat "$p/.credentials.json"
+    if [ -f "$p/.credentials.json" ]; then cat "$p/.credentials.json" || return 1; fi
     return 0
 }
 
@@ -316,8 +321,7 @@ Index() {   # same number `ccp list` shows
 # Subscription limits, from the endpoint behind claude's own /usage screen.
 # ponytail: undocumented API; if it changes, this prints "unavailable" and only Usage needs fixing.
 Usage() {   # profile name -> one JSON object, the shape `ccp usage --json` prints: keep it stable
-    local n=$1 d p creds tok exp out code body err status=ok
-    d=$(ProfileDir "$n") || exit 1
+    local n=$1 p creds tok exp out code body err status=ok
     p=$(ProfilePath "$n") || exit 1
     local obj
     # the fields after week are shared with `cxp usage --json`, so one script can rank both tools' profiles
@@ -325,7 +329,10 @@ Usage() {   # profile name -> one JSON object, the shape `ccp usage --json` prin
         --argjson pool "$(Bool InPool "$n")" \
         '{index: $idx, profile: $n, note: (if $note == "" then null else $note end), status: "ok", error: null,
           five_hour: null, week: null, number: $idx, path: $p, pool: $pool, headroom_percent: null, available: false}')
-    creds=$(ReadCreds "$n")
+    if ! creds=$(ReadCreds "$n" usage 2>/dev/null) || { [ -n "$creds" ] && ! jq -e 'type == "object"' <<<"$creds" >/dev/null 2>&1; }; then
+        jq -c '.status = "unavailable" | .error = "cannot read login credentials"' <<<"$obj"
+        return
+    fi
     tok=$(jq -r '.claudeAiOauth.accessToken // empty' <<<"$creds" 2>/dev/null)
     if [ -z "$tok" ]; then
         # an API-key profile can still run work; it just has no subscription window to measure
@@ -334,13 +341,10 @@ Usage() {   # profile name -> one JSON object, the shape `ccp usage --json` prin
         jq -c --argjson a "$(Bool [ -n "$key" ])" '.status = "no_login" | .available = $a' <<<"$obj"
         return
     fi
-    exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$creds" 2>/dev/null)
-    if [ "${exp%%.*}" -lt "$(NowMs)" ] 2>/dev/null; then
-        # stale token: let claude refresh it
-        if [ -n "$d" ]; then CLAUDE_CONFIG_DIR=$d claude auth status >/dev/null 2>&1 </dev/null
-        else (unset CLAUDE_CONFIG_DIR; claude auth status >/dev/null 2>&1 </dev/null); fi
-        creds=$(ReadCreds "$n")
-        tok=$(jq -r '.claudeAiOauth.accessToken // empty' <<<"$creds" 2>/dev/null)
+    exp=$(jq -r '.claudeAiOauth.expiresAt // empty' <<<"$creds")
+    if [ -n "$exp" ] && [ "${exp%%.*}" -le "$(NowMs)" ] 2>/dev/null; then
+        jq -c '.status = "expired"' <<<"$obj"
+        return
     fi
     # the token goes in through a curl config on stdin, not argv, so it never shows in `ps`
     out=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" |
@@ -349,19 +353,20 @@ Usage() {   # profile name -> one JSON object, the shape `ccp usage --json` prin
     code=${out##*$'\n'}; body=${out%$'\n'*}
     if [ "$code" != 200 ]; then
         status=unavailable; err="HTTP $code"
-        [ "$code" = 000 ] && err=$(printf '%s' "$body" | head -n 1 | sed 's/^curl: ([0-9]*) //')
+        [ "$code" = 000 ] && err='usage request failed or timed out'
         [ "$code" = 401 ] && status=expired
         jq -c --arg s "$status" --arg e "$err" '.status = $s | .error = $e' <<<"$obj"
         return
     fi
-    jq -c --argjson u "$body" '
+    jq -ec --argjson u "$body" '
         def utc: sub("\\.[0-9]+"; "") |
             if test("Z$") then fromdateiso8601
             else capture("^(?<d>.*)(?<s>[+-])(?<h>[0-9]{2}):?(?<m>[0-9]{2})$") as $c |
                 ($c.d + "Z" | fromdateiso8601) - (($c.s + "1" | tonumber) * (($c.h | tonumber) * 3600 + ($c.m | tonumber) * 60))
             end | todate;
         # null = no window open, nothing used; resets_at can be null (window reported but no reset time yet)
-        def win: if . then {percent: (.utilization // 0 | round), resets_at: (if .resets_at then (.resets_at | utc) else null end)} else null end;
+        def win: if . then {percent: (.utilization | round), resets_at: (if .resets_at then (.resets_at | utc) else null end)} else null end;
+        if ($u | type == "object" and (has("five_hour") or has("seven_day"))) then . else error("missing windows") end |
         .five_hour = ($u.five_hour | win) | .week = ($u.seven_day | win)
         # the fullest open window decides how much room is left
         | .headroom_percent = ([0, 100 - ([0, (.five_hour.percent // 0), (.week.percent // 0)] | max)] | max)
@@ -369,13 +374,28 @@ Usage() {   # profile name -> one JSON object, the shape `ccp usage --json` prin
         jq -c '.status = "unavailable" | .error = "unexpected reply from the usage endpoint"' <<<"$obj"
 }
 
+UsageAll() (
+    local dir n i pids=()
+    dir=$(mktemp -d) || exit 1
+    trap 'rm -rf "$dir"' EXIT
+    while IFS= read -r n; do
+        [ -n "$n" ] || continue
+        Usage "$n" > "$dir/${#pids[@]}" &
+        pids+=("$!")
+    done <<<"$1"
+    for ((i=0; i<${#pids[@]}; i++)); do
+        wait "${pids[$i]}" || exit 1
+        cat "$dir/$i"
+    done
+)
+
 UsageText() {   # one Usage object -> the human format
     local r=$1 status
     status=$(jq -r .status <<<"$r")
     case $status in
-        no_login) echo 'no subscription login (API-key profile?)'; return ;;
-        expired) echo "login expired; refresh it: ccp run $(jq -r .profile <<<"$r")"; return ;;
-        unavailable) echo "unavailable ($(jq -r .error <<<"$r"))"; return ;;
+        no_login) echo 'skip (no subscription login)'; return ;;
+        expired) echo "skip (login expired, use ccp run $(jq -r .profile <<<"$r") to sign in)"; return ;;
+        unavailable) echo "error ($(jq -r .error <<<"$r"))"; return ;;
     esac
     local w text=''
     for w in five_hour week; do
@@ -495,7 +515,8 @@ case $cmd in
             fi
         done
         # out-of-pool profiles are skipped before any lookup, so their tokens are never sent
-        all=$(while IFS= read -r n; do InPool "$n" && Usage "$n"; done < <(Names))
+        pool=$(while IFS= read -r n; do InPool "$n" && echo "$n"; done < <(Names))
+        all=$(UsageAll "$pool") || exit 1
         # API-key profiles (no known headroom) go last
         rows=$(printf '%s\n' "$all" | jq -c -s --argjson c "$count" \
             'map(select(.available)) | sort_by([-(.headroom_percent // -1), .number]) | .[:$c]')
@@ -568,18 +589,19 @@ case $cmd in
         who=; for o in "${opts[@]}"; do [ "$o" != --json ] && { who=$o; break; }; done
         if [ -n "$who" ]; then list=$(Resolve "$who") || exit 1; ProfileDir "$list" >/dev/null || exit 1
         else list=$(Names); fi
+        all=$(UsageAll "$list") || exit 1
         if Has --json "${opts[@]}"; then   # always an array, one line, even for a single profile
-            while IFS= read -r n; do Usage "$n"; done <<<"$list" | jq -c -s .
+            jq -c -s . <<<"$all"
         else
             w=$(awk '{ if (length($0) > m) m = length($0) } END { print m }' <<<"$list")
-            while IFS= read -r n; do
-                r=$(Usage "$n")
+            while IFS= read -r r; do
+                n=$(jq -r .profile <<<"$r")
                 line="$(jq -r .index <<<"$r") $(printf "%-${w}s" "$n")  $(UsageText "$r")"
                 [ "$(jq -r .pool <<<"$r")" = false ] && line+='  [pool off]'
                 note=$(jq -r '.note // empty' <<<"$r")
                 [ -n "$note" ] && line+="  # $note"
                 echo "$line"
-            done <<<"$list"
+            done <<<"$all"
         fi
         ;;
     backup)   # ccp backup [file] [-p | --password] [--only <name>] [--creds], in any order

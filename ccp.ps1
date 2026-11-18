@@ -234,62 +234,98 @@ function WithHome($dir, [scriptblock]$body) {
 }
 
 # Subscription limits, from the endpoint behind claude's own /usage screen.
-# ponytail: undocumented API; if it changes, this prints "unavailable" and only Usage needs fixing.
-function Usage($n) {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
-    $ProgressPreference = 'SilentlyContinue'
+function StartUsage($n, $client) {
     $idx = [array]::IndexOf(@(Names), $n) + 1   # same number `ccp list` shows
-    $d = ProfileDir $n
     $f = Join-Path (ProfilePath $n) '.credentials.json'
-    $read = { if (Test-Path $f) { ([IO.File]::ReadAllText($f) | ConvertFrom-Json).claudeAiOauth } }
     # the shape `ccp usage --json` prints: keep it stable, scripts depend on it
-    $r = [ordered]@{ index = $idx; profile = $n; note = (GetNote $n); status = 'ok'; error = $null; five_hour = $null; week = $null
+    $r = [pscustomobject]@{ index = $idx; profile = $n; note = (GetNote $n); status = 'ok'; error = $null; five_hour = $null; week = $null
         # the fields below are shared with `cxp usage --json`, so one script can rank both tools' profiles
         number = $idx; path = (ProfilePath $n); pool = (InPool $n); headroom_percent = $null; available = $false }
-    $o = & $read
+    $lookup = @{ Row = $r; Task = $null }
+    $o = $null
+    try {
+        if (Test-Path $f) { $o = ([IO.File]::ReadAllText($f) | ConvertFrom-Json).claudeAiOauth }
+    } catch {
+        $r.status = 'unavailable'; $r.error = 'cannot read login credentials'
+        return $lookup
+    }
     if (-not $o.accessToken) {
         $r.status = 'no_login'
         # an API-key profile can still run work; it just has no subscription window to measure
         try { $r.available = [bool](LoadCfg (ConfigPath $n)).env.ANTHROPIC_API_KEY } catch { }
-        return [pscustomobject]$r
+        return $lookup
     }
-    if ($o.expiresAt -lt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
-        # stale token: let claude refresh it. Via cmd so its stderr can't trip $ErrorActionPreference.
-        WithHome $d { cmd /c 'claude auth status >nul 2>&1' }
-        $o = & $read
+    if ($null -ne $o.expiresAt -and $o.expiresAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
+        $r.status = 'expired'
+        return $lookup
     }
     try {
-        $u = Invoke-RestMethod 'https://api.anthropic.com/api/oauth/usage' -TimeoutSec 20 -Headers @{
-            Authorization = "Bearer $($o.accessToken)"; 'anthropic-beta' = 'oauth-2025-04-20'
-        }
+        $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get, 'https://api.anthropic.com/api/oauth/usage')
+        $request.Headers.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $o.accessToken)
+        $request.Headers.Add('anthropic-beta', 'oauth-2025-04-20')
+        $lookup.Task = $client.SendAsync($request)
     } catch {
-        $r.status = 'unavailable'; $r.error = $_.Exception.Message
-        if ($_.Exception.Response.StatusCode.value__ -eq 401) { $r.status = 'expired' }
-        return [pscustomobject]$r
+        $r.status = 'unavailable'; $r.error = 'cannot start usage request'
     }
-    $win = {   # null = no window open, nothing used
-        param($w)
-        if ($w) {
-            # resets_at can be null (window reported but no reset time yet)
-            $at = $null
-            if ($w.resets_at) { $at = ([DateTimeOffset]$w.resets_at).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
-            [ordered]@{ percent = [int]$w.utilization; resets_at = $at }
+    $lookup
+}
+
+function ReadUsage($lookup) {
+    $r = $lookup.Row
+    if (-not $lookup.Task) { return $r }
+    try { $response = $lookup.Task.GetAwaiter().GetResult() } catch {
+        $r.status = 'unavailable'
+        $r.error = if ($lookup.Task.IsCanceled) { 'lookup timed out' } else { 'usage request failed' }
+        return $r
+    }
+    try {
+        if (-not $response.IsSuccessStatusCode) {
+            $r.status = if ([int]$response.StatusCode -eq 401) { 'expired' } else { 'unavailable' }
+            $r.error = "HTTP $([int]$response.StatusCode)"
+            return $r
         }
-    }
-    $r.five_hour = & $win $u.five_hour
-    $r.week = & $win $u.seven_day
-    $used = 0   # the fullest open window decides how much room is left
-    foreach ($w in $r.five_hour, $r.week) { if ($w -and $w.percent -gt $used) { $used = $w.percent } }
-    $r.headroom_percent = [math]::Max(0, 100 - $used)
-    $r.available = $r.headroom_percent -gt 0
-    [pscustomobject]$r
+        $u = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+        if (-not ($u.PSObject.Properties['five_hour'] -or $u.PSObject.Properties['seven_day'])) { throw 'missing windows' }
+        $win = {
+            param($w)
+            if ($w) {
+                if ($null -eq $w.utilization) { throw 'missing utilization' }
+                $at = $null
+                if ($w.resets_at) { $at = ([DateTimeOffset]$w.resets_at).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+                [ordered]@{ percent = [int]$w.utilization; resets_at = $at }
+            }
+        }
+        $r.five_hour = & $win $u.five_hour
+        $r.week = & $win $u.seven_day
+        $used = 0   # the fullest open window decides how much room is left
+        foreach ($w in $r.five_hour, $r.week) { if ($w -and $w.percent -gt $used) { $used = $w.percent } }
+        $r.headroom_percent = [math]::Max(0, 100 - $used)
+        $r.available = $r.headroom_percent -gt 0
+    } catch {
+        $r.status = 'unavailable'; $r.error = 'unexpected reply from the usage endpoint'
+        $r.five_hour = $null; $r.week = $null
+    } finally { $response.Dispose() }
+    $r
+}
+
+function UsageAll($names) {
+    Add-Type -AssemblyName System.Net.Http
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 'Tls12'
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.MaxConnectionsPerServer = [Math]::Max(1, $names.Count)
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(20)
+    try {
+        $lookups = @(foreach ($n in $names) { StartUsage $n $client })
+        foreach ($lookup in $lookups) { ReadUsage $lookup }
+    } finally { $client.Dispose() }
 }
 
 function UsageText($r) {
     switch ($r.status) {
-        'no_login'    { return 'no subscription login (API-key profile?)' }
-        'expired'     { return "login expired; refresh it: ccp run $($r.profile)" }
-        'unavailable' { return "unavailable ($($r.error))" }
+        'no_login'    { return 'skip (no subscription login)' }
+        'expired'     { return "skip (login expired, use ccp run $($r.profile) to sign in)" }
+        'unavailable' { return "error ($($r.error))" }
     }
     $fmt = {
         param($w)
@@ -396,7 +432,7 @@ switch ($cmd) {
             $count = [int]$o[$i + 1]
         }
         # out-of-pool profiles are skipped before any lookup, so their tokens are never sent
-        $rows = @(foreach ($n in @(Names | Where-Object { InPool $_ })) { Usage $n }) | Where-Object { $_.available }
+        $rows = @(UsageAll @(Names | Where-Object { InPool $_ })) | Where-Object { $_.available }
         $rows = @($rows | Sort-Object @{ Expression = { if ($null -eq $_.headroom_percent) { -1 } else { $_.headroom_percent } }; Descending = $true },
             @{ Expression = { $_.number } } | Select-Object -First $count)   # API-key profiles (no known headroom) go last
         if (-not $rows.Count) { throw 'No profile available: all are out of the pool, at their limit, or not logged in (see: ccp usage)' }
@@ -461,11 +497,11 @@ switch ($cmd) {
         $list = @(Names)
         if ($who) { $list = @(Resolve $who) }
         if ($opts -contains '--json') {   # always an array, one line, even for a single profile
-            ConvertTo-Json -Compress -Depth 5 -InputObject @(foreach ($n in $list) { Usage $n })
+            ConvertTo-Json -Compress -Depth 5 -InputObject @(UsageAll $list)
         } else {
             $w = ($list | Measure-Object Length -Maximum).Maximum
-            foreach ($n in $list) {
-                $r = Usage $n
+            foreach ($r in (UsageAll $list)) {
+                $n = $r.profile
                 $line = "$($r.index) $($n.PadRight($w))  $(UsageText $r)"
                 if (-not $r.pool) { $line += '  [pool off]' }
                 if ($r.note) { $line += "  # $($r.note)" }

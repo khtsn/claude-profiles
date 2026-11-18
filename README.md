@@ -187,7 +187,7 @@ set `CLAUDE_CONFIG_DIR` to it. For `home`, leave the variable unset instead.
 > ccp usage
 1 home   5h  12% (resets Tue 19:00)   week  31% (resets Fri 09:00)  # personal
 2 work   5h -                         week  47% (resets Thu 22:59)  # team account
-3 api    no subscription login (API-key profile?)
+3 api    skip (no subscription login)
 ```
 
 The leading number is the profile's index from `ccp list`, so `ccp usage 2` or
@@ -214,8 +214,8 @@ single profile:
 | --- | --- |
 | `index` | Position in `ccp list` |
 | `note` | The profile's note, or `null` |
-| `status` | `ok`, `no_login` (API-key profile), `expired` (login needs a refresh) or `unavailable` (request failed) |
-| `error` | The error message when `status` is `unavailable`, otherwise `null` |
+| `status` | `ok`, `no_login` (no subscription login), `expired` (sign in again) or `unavailable` (credential or lookup error) |
+| `error` | A diagnostic for a credential, HTTP or response error, otherwise `null` |
 | `five_hour`, `week` | `percent` used (integer) and `resets_at` (UTC, ISO 8601); `null` when no window is open or `status` is not `ok` |
 | `number` | Same as `index` |
 | `path` | The profile's config folder |
@@ -257,10 +257,11 @@ profile. Profiles out of the pool show `[pool off]` in `ccp list` and `ccp usage
 
 - It sends each profile's login token to `api.anthropic.com`, the same endpoint
   Claude Code's own `/usage` screen calls. That endpoint is undocumented and may
-  change; if it does, the line reads `unavailable`.
-- A profile that has not been used for a while has a stale token. `ccp usage`
-  asks `claude` to refresh it; if that fails you get `login expired`, and running
-  `ccp run <name>` once fixes it.
+  change. Requests run concurrently with a 20-second timeout per request.
+- A missing or expired subscription login shows `skip`. Sign in again with
+  `ccp run <name>` to resume usage reporting for an expired profile.
+  An unreadable login or a failed lookup shows `error`. The other profiles keep
+  their own results in list order.
 - API-key profiles have no subscription limits. Their spend is in the Anthropic
   Console.
 

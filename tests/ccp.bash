@@ -63,6 +63,31 @@ u=$(ccp usage a --json)
 mkdir "$fixture/profiles/c"   # no login at all
 [ "$(ccp usage c --json | jq '.[0].available')" = false ] || fail 'A profile without a login should not be available'
 
+# Use all three subscription outcomes in one report, including a local-only home.
+(
+    export HOME="$fixture/home"
+    bin=$(mktemp -d "$fixture/usage-bin.XXXXXX"); export PATH="$bin:$PATH"
+    printf '#!/bin/sh\nexit 44\n' > "$bin/security"   # no keychain items, including home
+    cat > "$bin/curl" <<'MOCK'
+#!/bin/sh
+read -r header
+case "$header" in
+    *healthy*) printf '{"five_hour":{"utilization":17},"seven_day":null}\n200' ;;
+    *) printf '{}\n401' ;;
+esac
+MOCK
+    chmod +x "$bin/security" "$bin/curl"
+    echo '{"claudeAiOauth":{"accessToken":"healthy"}}' > "$a/.credentials.json"
+    echo '{"claudeAiOauth":{"accessToken":"stale","expiresAt":1}}' > "$fixture/profiles/b/.credentials.json"
+    echo '{bad login' > "$fixture/profiles/c/.credentials.json"
+    rows=$(ccp usage --json) || exit 1
+    jq -e 'map(.status) == ["no_login","ok","expired","unavailable"] and .[1].headroom_percent == 83' <<<"$rows" >/dev/null || exit 1
+    [ ! -e "$fixture/ran" ] || exit 1
+    echo '{"claudeAiOauth":{"accessToken":"rejected"}}' > "$fixture/profiles/c/.credentials.json"
+    [ "$(ccp usage c --json | jq -r '.[0].status')" = expired ] || exit 1
+) || fail 'Mixed subscription report lost a row or launched a login'
+rm "$a/.credentials.json" "$fixture/profiles/b/.credentials.json" "$fixture/profiles/c/.credentials.json"
+
 # pool + pick
 [ "$(ccp pick)" = a ] || fail 'pick should return the first available pool profile'
 [ "$(ccp pick -n 5 | paste -sd, -)" = a,b ] || fail 'pick -n should list every available pool profile, not home or c'

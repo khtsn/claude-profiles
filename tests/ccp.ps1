@@ -57,6 +57,36 @@ exit /b 7'
     $null = New-Item -ItemType Directory -Path (Join-Path $fixture 'profiles\c')   # no login at all
     Assert ((Json (& $scriptPath usage c --json))[0].available -eq $false) 'A profile without a login should not be available'
 
+    $creds = Join-Path $fixture 'profiles\c\.credentials.json'
+    Set-Content $creds '{"claudeAiOauth":{"accessToken":"test","expiresAt":1}}'
+    Assert ((Json (& $scriptPath usage c --json))[0].status -eq 'expired') 'Expired session was not skipped'
+    Assert ((& $scriptPath usage c) -match 'skip \(login expired') 'Missing visible skip reason'
+    Assert (-not (Test-Path (Join-Path $fixture 'ran'))) 'Usage launched an interactive refresh'
+    Set-Content $creds '{bad login'
+    Assert ((Json (& $scriptPath usage c --json))[0].error -eq 'cannot read login credentials') 'Bad login lost its error row'
+    & {
+        # Exercise the live response parser with an in-memory HTTP client.
+        . $scriptPath usage c --json | Out-Null
+        $client = New-Object PSObject
+        $client | Add-Member ScriptMethod SendAsync {
+            param($request)
+            Assert ($request.Headers.Authorization.Parameter -eq 'healthy') 'Wrong profile token'
+            $reply = [Net.Http.HttpResponseMessage]::new($httpStatus)
+            $reply.Content = [Net.Http.StringContent]::new('{"five_hour":{"utilization":17},"seven_day":null}')
+            $task = [Threading.Tasks.TaskCompletionSource[Net.Http.HttpResponseMessage]]::new()
+            $task.SetResult($reply)
+            $task.Task
+        }
+        Set-Content $creds '{"claudeAiOauth":{"accessToken":"healthy"}}'
+        $httpStatus = [Net.HttpStatusCode]::OK
+        $row = ReadUsage (StartUsage c $client)
+        Assert ($row.status -eq 'ok' -and $row.headroom_percent -eq 83) 'Healthy usage data missing'
+        $httpStatus = [Net.HttpStatusCode]::Unauthorized
+        $row = ReadUsage (StartUsage c $client)
+        Assert ($row.status -eq 'expired' -and -not $row.available) 'Rejected login remained available'
+    }
+    Remove-Item $creds
+
     # pool + pick
     Assert ((& $scriptPath pick) -eq 'a') 'pick should return the first available pool profile'
     Assert (((& $scriptPath pick -n 5) -join ',') -eq 'a,b') 'pick -n should list every available pool profile, not home or c'
